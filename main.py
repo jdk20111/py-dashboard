@@ -412,15 +412,15 @@ def draw_calendar(surf, fonts, rect):
         return
 
     max_w = rect.w - 20
-    for ev in events[:6]:
-        s = fonts["sm"].render(ev, True, TEXT)
+    for ev in events[:5]:
+        s = fonts["md"].render(ev, True, TEXT)
         if s.get_width() > max_w:
             while s.get_width() > max_w and len(ev) > 3:
                 ev = ev[:-1]
-                s = fonts["sm"].render(ev + "...", True, TEXT)
-            s = fonts["sm"].render(ev + "...", True, TEXT)
+                s = fonts["md"].render(ev + "...", True, TEXT)
+            s = fonts["md"].render(ev + "...", True, TEXT)
         surf.blit(s, (x, y))
-        y += 20
+        y += 24
         if y > rect.bottom - 10:
             break
 
