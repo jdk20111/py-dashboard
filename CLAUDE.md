@@ -78,6 +78,12 @@ def row(surf, fonts, x, y, label, value, val_color=TEXT, label_w=160) -> int:
 
 **Font sizes** (Ubuntu/sans): `xl`=52 bold, `lg`=34 bold, `md`=22, `sm`=17.
 
+## Raspberry Pi system notes
+
+- **OS**: Raspberry Pi OS (aarch64); Python 3.13 at `/usr/bin/python3`; no virtual environment, packages installed system-wide with pip
+- **journald**: configured for volatile (RAM) storage via `/etc/systemd/journald.conf.d/volatile.conf` — logs do not persist across reboots; done to reduce SD card write latency (was averaging 828 ms/op)
+- **Monitoring**: `prometheus-node-exporter` runs and reports to Grafana; SD card write latency alerts will read higher than SSD baselines — this is normal for an SD card
+
 ## Deployment on Ubuntu/Intel (macmini1)
 
 Second deployment of this exact repo. Edits are made upstream on `py-dashboard`; this host pulls them automatically (see "Keeping in sync").
