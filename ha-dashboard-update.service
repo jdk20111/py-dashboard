@@ -1,0 +1,8 @@
+[Unit]
+Description=Sync py-dashboard from git and restart the dashboard if changed
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/home/jdk201/ha-dashboard/update.sh
