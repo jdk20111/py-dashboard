@@ -466,8 +466,13 @@ def draw_lights(surf, fonts, rect):
 # (1920x1080, 32bpp BGRX). The canvas is scaled to fit, preserving aspect ratio,
 # centered, with an optional safe-area inset (FB_SAFE_MARGIN) so a TV that
 # overscans doesn't clip the edges. Defaults are a no-op on the Pi.
-FB_DEVICE      = os.environ.get("FB_DEVICE", "/dev/fb0")
-FB_SAFE_MARGIN = float(os.environ.get("FB_SAFE_MARGIN", "0"))
+FB_DEVICE        = os.environ.get("FB_DEVICE", "/dev/fb0")
+FB_SAFE_MARGIN   = float(os.environ.get("FB_SAFE_MARGIN", "0"))
+# Optional per-axis margin overrides. When either is set, the canvas fills each
+# axis independently (allowing a deliberate horizontal/vertical stretch, e.g. to
+# widen past the aspect-locked side bars); otherwise the fit stays aspect-locked.
+FB_SAFE_MARGIN_X = os.environ.get("FB_SAFE_MARGIN_X")
+FB_SAFE_MARGIN_Y = os.environ.get("FB_SAFE_MARGIN_Y")
 
 _fb_file   = None
 _fb_w      = SCREEN_WIDTH
@@ -503,11 +508,18 @@ def _open_fb():
     except (OSError, ValueError) as e:
         print(f"Warning: cannot read fb geometry ({e}); assuming canvas/16bpp", flush=True)
         _fb_w, _fb_h, _fb_bpp, _fb_stride = SCREEN_WIDTH, SCREEN_HEIGHT, 16, SCREEN_WIDTH * 2
-    # Aspect-preserving, centered destination rect with safe-area inset.
-    scale = min((_fb_w * (1.0 - 2.0 * FB_SAFE_MARGIN)) / SCREEN_WIDTH,
-                (_fb_h * (1.0 - 2.0 * FB_SAFE_MARGIN)) / SCREEN_HEIGHT)
-    dw = max(1, int(SCREEN_WIDTH * scale))
-    dh = max(1, int(SCREEN_HEIGHT * scale))
+    # Centered destination rect with safe-area inset. Default: aspect-preserving
+    # fit. If a per-axis margin override is set, fill each axis independently.
+    if FB_SAFE_MARGIN_X is None and FB_SAFE_MARGIN_Y is None:
+        scale = min((_fb_w * (1.0 - 2.0 * FB_SAFE_MARGIN)) / SCREEN_WIDTH,
+                    (_fb_h * (1.0 - 2.0 * FB_SAFE_MARGIN)) / SCREEN_HEIGHT)
+        dw = max(1, int(SCREEN_WIDTH * scale))
+        dh = max(1, int(SCREEN_HEIGHT * scale))
+    else:
+        mx = float(FB_SAFE_MARGIN_X) if FB_SAFE_MARGIN_X is not None else FB_SAFE_MARGIN
+        my = float(FB_SAFE_MARGIN_Y) if FB_SAFE_MARGIN_Y is not None else FB_SAFE_MARGIN
+        dw = max(1, int(_fb_w * (1.0 - 2.0 * mx)))
+        dh = max(1, int(_fb_h * (1.0 - 2.0 * my)))
     _dst = ((_fb_w - dw) // 2, (_fb_h - dh) // 2, dw, dh)
     print(f"fb: {_fb_w}x{_fb_h}@{_fb_bpp}bpp stride={_fb_stride} "
           f"dst={_dst} margin={FB_SAFE_MARGIN}", flush=True)

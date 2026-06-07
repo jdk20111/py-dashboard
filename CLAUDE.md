@@ -57,6 +57,7 @@ The canvas is always rendered at `SCREEN_WIDTH × SCREEN_HEIGHT` (1024×600). `_
 - **Stride**: rows are padded to the fb's `stride` when it exceeds `width × bytes`.
 - **Scaling**: when the panel is larger than the canvas, the canvas is `smoothscale`d up, aspect-preserved, and centered; the surround is filled with `BG`.
 - **`FB_SAFE_MARGIN`** (env, default `0`): fractional inset on each side so a TV that overscans doesn't clip the edges. The Pi leaves it `0` (pixel-identical to before); `macmini1` sets `0.04` in its `.env`. `FB_DEVICE` (env, default `/dev/fb0`) overrides the device.
+- **`FB_SAFE_MARGIN_X` / `FB_SAFE_MARGIN_Y`** (env, optional): per-axis margin overrides. When either is set, the canvas fills each axis independently instead of aspect-fitting — useful to widen past the aspect-locked side bars (a deliberate horizontal stretch). `macmini1` uses `X=0.03, Y=0.04` to pull the sides out ~1 inch each while keeping the vertical inset. Lower = larger on that axis.
 
 On the Pi specifically, the `vc4drmfb` driver holds DRM master permanently (`vc4.kms_fbdev=0` is silently ignored — `vc4: unknown parameter 'kms_fbdev' ignored`), so SDL's kmsdrm driver can never acquire DRM master; direct `/dev/fb0` file I/O is the working path. On Intel the same direct-fb path is used.
 
@@ -88,14 +89,20 @@ Second deployment of this exact repo. Edits are made upstream on `py-dashboard`;
 ```bash
 sudo apt install -y python3-pygame python3-numpy python3-websockets
 sudo usermod -aG video jdk201          # grant /dev/fb0 write (service picks it up on next start)
-git clone https://github.com/jdk20111/py-dashboard.git /home/jdk201/ha-dashboard
-# .env (git-ignored): HA_HOST/HA_TOKEN plus the overscan inset
-printf 'FB_SAFE_MARGIN=0.04\n' >> /home/jdk201/ha-dashboard/.env
+# Repos live in ~/repos on this host; the service path is ~/ha-dashboard, so symlink it.
+git clone https://github.com/jdk20111/ha-dashboard.git /home/jdk201/repos/ha-dashboard
+ln -s /home/jdk201/repos/ha-dashboard /home/jdk201/ha-dashboard
+# .env (git-ignored): HA_HOST/HA_TOKEN plus the overscan/width insets
+cat >> /home/jdk201/ha-dashboard/.env <<'ENV'
+FB_SAFE_MARGIN=0.04
+FB_SAFE_MARGIN_X=0.03
+FB_SAFE_MARGIN_Y=0.04
+ENV
 sudo cp /home/jdk201/ha-dashboard/ha-dashboard.service /etc/systemd/system/
 sudo systemctl daemon-reload && sudo systemctl enable --now ha-dashboard
 ```
 
-The `ha-dashboard.service` file is shared with the Pi unchanged — apt's `python3-*` keep `/usr/bin/python3` and websockets 10.4, which `ha_client.py` is compatible with.
+The `ha-dashboard.service` file is shared with the Pi unchanged (it uses the `~/ha-dashboard` path) — apt's `python3-*` keep `/usr/bin/python3` and websockets 10.4, which `ha_client.py` is compatible with. On `macmini1` the checkout lives at `~/repos/ha-dashboard` with `~/ha-dashboard` symlinked to it, so the shared unit, `update.sh`, and `EnvironmentFile` all resolve without editing the unit.
 
 **Keeping in sync**: `update.sh` + `ha-dashboard-update.{service,timer}` poll `origin` every 10 min and `git pull` + restart only when the branch moved. Install once:
 
