@@ -1,5 +1,5 @@
 [Unit]
-Description=Sync py-dashboard from git and restart the dashboard if changed
+Description=Sync ha-dashboard from git and restart the dashboard if changed
 After=network-online.target
 Wants=network-online.target
 

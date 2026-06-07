@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Sync this deployment with the py-dashboard repo and restart the dashboard
+# Sync this deployment with the ha-dashboard repo and restart the dashboard
 # only when something actually changed. Driven by ha-dashboard-update.timer;
 # also safe to run manually with `sudo ./update.sh`.
 #

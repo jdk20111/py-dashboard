@@ -1,9 +1,9 @@
 [Unit]
-Description=Periodically sync py-dashboard from git
+Description=Periodically sync ha-dashboard from git
 
 [Timer]
 OnBootSec=2min
-OnUnitActiveSec=10min
+OnUnitActiveSec=1h
 Persistent=true
 
 [Install]
