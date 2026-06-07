@@ -412,7 +412,7 @@ def draw_calendar(surf, fonts, rect):
         return
 
     max_w = rect.w - 20
-    for ev in events[:6]:
+    for ev in events[:5]:
         s = fonts["sm"].render(ev, True, TEXT)
         if s.get_width() > max_w:
             while s.get_width() > max_w and len(ev) > 3:
@@ -461,7 +461,28 @@ def draw_lights(surf, fonts, rect):
         surf.blit(fonts["sm"].render(label, True, TEXT if st == "on" else DIM), (lx + 14, ly + 2))
 
 
-_fb_file = None
+# Framebuffer output.
+#
+# The canvas is always rendered at SCREEN_WIDTH x SCREEN_HEIGHT. The fb layer
+# auto-adapts to whatever /dev/fb0 actually is (size, depth, stride) so the same
+# code runs on the Pi (1024x600, 16bpp RGB565) and on an Intel/Ubuntu box
+# (1920x1080, 32bpp BGRX). The canvas is scaled to fit, preserving aspect ratio,
+# centered, with an optional safe-area inset (FB_SAFE_MARGIN) so a TV that
+# overscans doesn't clip the edges. Defaults are a no-op on the Pi.
+FB_DEVICE        = os.environ.get("FB_DEVICE", "/dev/fb0")
+FB_SAFE_MARGIN   = float(os.environ.get("FB_SAFE_MARGIN", "0"))
+# Optional per-axis margin overrides. When either is set, the canvas fills each
+# axis independently (allowing a deliberate horizontal/vertical stretch, e.g. to
+# widen past the aspect-locked side bars); otherwise the fit stays aspect-locked.
+FB_SAFE_MARGIN_X = os.environ.get("FB_SAFE_MARGIN_X")
+FB_SAFE_MARGIN_Y = os.environ.get("FB_SAFE_MARGIN_Y")
+
+_fb_file   = None
+_fb_w      = SCREEN_WIDTH
+_fb_h      = SCREEN_HEIGHT
+_fb_bpp    = 16
+_fb_stride = SCREEN_WIDTH * 2
+_dst       = (0, 0, SCREEN_WIDTH, SCREEN_HEIGHT)   # (x, y, w, h) of canvas within fb
 
 def _tty_cursor(visible: bool):
     seq = b'\033[?25h' if visible else b'\033[?25l'
@@ -471,24 +492,79 @@ def _tty_cursor(visible: bool):
     except OSError:
         pass
 
+def _read_fb_geometry():
+    def rd(name):
+        with open(f"/sys/class/graphics/fb0/{name}") as f:
+            return f.read().strip()
+    w, h = (int(v) for v in rd("virtual_size").split(","))
+    return w, h, int(rd("bits_per_pixel")), int(rd("stride"))
+
 def _open_fb():
-    global _fb_file
+    global _fb_file, _fb_w, _fb_h, _fb_bpp, _fb_stride, _dst
     try:
-        _fb_file = open("/dev/fb0", "r+b")
+        _fb_file = open(FB_DEVICE, "r+b")
     except OSError as e:
-        print(f"Warning: cannot open /dev/fb0: {e}", flush=True)
+        print(f"Warning: cannot open {FB_DEVICE}: {e}", flush=True)
+        return
+    try:
+        _fb_w, _fb_h, _fb_bpp, _fb_stride = _read_fb_geometry()
+    except (OSError, ValueError) as e:
+        print(f"Warning: cannot read fb geometry ({e}); assuming canvas/16bpp", flush=True)
+        _fb_w, _fb_h, _fb_bpp, _fb_stride = SCREEN_WIDTH, SCREEN_HEIGHT, 16, SCREEN_WIDTH * 2
+    # Centered destination rect with safe-area inset. Default: aspect-preserving
+    # fit. If a per-axis margin override is set, fill each axis independently.
+    if FB_SAFE_MARGIN_X is None and FB_SAFE_MARGIN_Y is None:
+        scale = min((_fb_w * (1.0 - 2.0 * FB_SAFE_MARGIN)) / SCREEN_WIDTH,
+                    (_fb_h * (1.0 - 2.0 * FB_SAFE_MARGIN)) / SCREEN_HEIGHT)
+        dw = max(1, int(SCREEN_WIDTH * scale))
+        dh = max(1, int(SCREEN_HEIGHT * scale))
+    else:
+        mx = float(FB_SAFE_MARGIN_X) if FB_SAFE_MARGIN_X is not None else FB_SAFE_MARGIN
+        my = float(FB_SAFE_MARGIN_Y) if FB_SAFE_MARGIN_Y is not None else FB_SAFE_MARGIN
+        dw = max(1, int(_fb_w * (1.0 - 2.0 * mx)))
+        dh = max(1, int(_fb_h * (1.0 - 2.0 * my)))
+    _dst = ((_fb_w - dw) // 2, (_fb_h - dh) // 2, dw, dh)
+    print(f"fb: {_fb_w}x{_fb_h}@{_fb_bpp}bpp stride={_fb_stride} "
+          f"dst={_dst} margin={FB_SAFE_MARGIN}", flush=True)
+
+def _compose_rgb(surface: pygame.Surface):
+    """Scale+center the canvas into an (fb_h, fb_w, 3) uint8 RGB array."""
+    dx, dy, dw, dh = _dst
+    if (dw, dh) != (SCREEN_WIDTH, SCREEN_HEIGHT):
+        surface = pygame.transform.smoothscale(surface, (dw, dh))
+    img = pygame.surfarray.array3d(surface).transpose(1, 0, 2)   # (dh, dw, 3)
+    if (_fb_w, _fb_h) == (dw, dh):
+        return np.ascontiguousarray(img)
+    full = np.empty((_fb_h, _fb_w, 3), dtype=np.uint8)
+    full[:, :] = BG                                              # letterbox fill
+    full[dy:dy + dh, dx:dx + dw] = img
+    return full
 
 def _write_to_fb(surface: pygame.Surface):
     if _fb_file is None:
         return
-    px = pygame.surfarray.array3d(surface)   # (W, H, 3) uint8, RGB
-    px = px.transpose(1, 0, 2)              # (H, W, 3)
-    r = px[:, :, 0].astype(np.uint16)
-    g = px[:, :, 1].astype(np.uint16)
-    b = px[:, :, 2].astype(np.uint16)
-    rgb565 = ((r >> 3) << 11) | ((g >> 2) << 5) | (b >> 3)
+    rgb = _compose_rgb(surface)                                  # (H, W, 3) RGB
+    h, w = rgb.shape[:2]
+    if _fb_bpp == 16:
+        r = rgb[:, :, 0].astype(np.uint16)
+        g = rgb[:, :, 1].astype(np.uint16)
+        b = rgb[:, :, 2].astype(np.uint16)
+        packed = ((r >> 3) << 11) | ((g >> 2) << 5) | (b >> 3)   # (H, W) uint16
+        frame = np.ascontiguousarray(packed).view(np.uint8).reshape(h, w * 2)
+    else:                                                        # 32bpp BGRX little-endian
+        out = np.empty((h, w, 4), dtype=np.uint8)
+        out[:, :, 0] = rgb[:, :, 2]   # B
+        out[:, :, 1] = rgb[:, :, 1]   # G
+        out[:, :, 2] = rgb[:, :, 0]   # R
+        out[:, :, 3] = 255            # X
+        frame = out.reshape(h, w * 4)
+    row_bytes = frame.shape[1]
+    if _fb_stride and _fb_stride != row_bytes:                   # honor padded stride
+        padded = np.zeros((h, _fb_stride), dtype=np.uint8)
+        padded[:, :row_bytes] = frame
+        frame = padded
     _fb_file.seek(0)
-    _fb_file.write(rgb565.tobytes())
+    _fb_file.write(frame.tobytes())
     _fb_file.flush()
 
 

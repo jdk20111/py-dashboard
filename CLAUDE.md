@@ -4,12 +4,16 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-A fullscreen pygame dashboard for a Raspberry Pi that displays live Home Assistant sensor data. It renders to `/dev/fb0` directly (bypassing X11/Wayland), managed by a systemd service.
+A fullscreen pygame dashboard that displays live Home Assistant sensor data. It renders to `/dev/fb0` directly (bypassing X11/Wayland), managed by a systemd service. The same codebase runs on a **Raspberry Pi** (1024×600, 16bpp RGB565) and on an **Intel/Ubuntu box** such as `macmini1` (1920×1080, 32bpp) — the framebuffer layer auto-adapts to the panel's size/depth/stride and scales the canvas to fit (see "Display path"). The Pi is the original target; `macmini1` is a second deployment kept in sync via git (see "Deployment on Ubuntu/Intel").
 
 ## Dependencies
 
 ```bash
+# Raspberry Pi (pip)
 pip install pygame numpy websockets
+
+# Ubuntu/Debian (apt — keeps system /usr/bin/python3, matches the service file)
+sudo apt install -y python3-pygame python3-numpy python3-websockets
 ```
 
 ## Configuration
@@ -46,7 +50,16 @@ The app has two threads:
 
 ## Display path
 
-`SDL_VIDEODRIVER=offscreen` is set in `main.py` and the service file — pygame renders into an in-memory surface, never touching a real display. After each frame, `_write_to_fb()` converts the surface to raw RGB565 bytes via numpy and writes directly to `/dev/fb0` (the `vc4drmfb` framebuffer backed by the KMS/DRM pipeline). `pygame.display.flip()` is not called.
+`SDL_VIDEODRIVER=offscreen` is set in `main.py` and the service file — pygame renders into an in-memory surface, never touching a real display. After each frame, `_write_to_fb()` packs the surface into the framebuffer's native format via numpy and writes directly to `/dev/fb0`. `pygame.display.flip()` is not called.
+
+The canvas is always rendered at `SCREEN_WIDTH × SCREEN_HEIGHT` (1024×600). `_open_fb()` reads the real panel geometry from `/sys/class/graphics/fb0/{virtual_size,bits_per_pixel,stride}` and `_write_to_fb()` adapts:
+- **Depth**: 16bpp → RGB565 (Pi); 32bpp → BGRX little-endian (Intel). If red/blue ever look swapped, swap the B/R channel assignment in `_write_to_fb()`.
+- **Stride**: rows are padded to the fb's `stride` when it exceeds `width × bytes`.
+- **Scaling**: when the panel is larger than the canvas, the canvas is `smoothscale`d up, aspect-preserved, and centered; the surround is filled with `BG`.
+- **`FB_SAFE_MARGIN`** (env, default `0`): fractional inset on each side so a TV that overscans doesn't clip the edges. The Pi leaves it `0` (pixel-identical to before); `macmini1` sets `0.04` in its `.env`. `FB_DEVICE` (env, default `/dev/fb0`) overrides the device.
+- **`FB_SAFE_MARGIN_X` / `FB_SAFE_MARGIN_Y`** (env, optional): per-axis margin overrides. When either is set, the canvas fills each axis independently instead of aspect-fitting — useful to widen past the aspect-locked side bars (a deliberate horizontal stretch). `macmini1` uses `X=0.03, Y=0.04` to pull the sides out ~1 inch each while keeping the vertical inset. Lower = larger on that axis.
+
+On the Pi specifically, the `vc4drmfb` driver holds DRM master permanently (`vc4.kms_fbdev=0` is silently ignored — `vc4: unknown parameter 'kms_fbdev' ignored`), so SDL's kmsdrm driver can never acquire DRM master; direct `/dev/fb0` file I/O is the working path. On Intel the same direct-fb path is used.
 
 **Why not kmsdrm**: the `vc4drmfb` kernel driver holds DRM master permanently (the `vc4.kms_fbdev=0` parameter is silently ignored on this kernel — `vc4: unknown parameter 'kms_fbdev' ignored`), so SDL's kmsdrm driver can never acquire DRM master. Direct `/dev/fb0` file I/O is the working path.
 
@@ -64,3 +77,43 @@ def row(surf, fonts, x, y, label, value, val_color=TEXT, label_w=160) -> int:
 ```
 
 **Font sizes** (Ubuntu/sans): `xl`=52 bold, `lg`=34 bold, `md`=22, `sm`=17.
+
+## Deployment on Ubuntu/Intel (macmini1)
+
+Second deployment of this exact repo. Edits are made upstream on `py-dashboard`; this host pulls them automatically (see "Keeping in sync").
+
+**Host**: `macmini1` — Ubuntu 24.04.4 LTS, kernel 6.8.0-124-generic, Intel Core i5-3210M, 8 GB RAM, IP `192.168.68.152`. No desktop environment — pure TTY. Display is a 1080p TV on the **direct HDMI** port (`HDMI-A-3`); a USB-to-HDMI adapter (Norelsys NS1081) is also plugged in but has no Linux DRM driver and never produces signal — ignore it. `sudo` is passwordless.
+
+**Install**
+
+```bash
+sudo apt install -y python3-pygame python3-numpy python3-websockets
+sudo usermod -aG video jdk201          # grant /dev/fb0 write (service picks it up on next start)
+# Repos live in ~/repos on this host; the service path is ~/ha-dashboard, so symlink it.
+git clone https://github.com/jdk20111/ha-dashboard.git /home/jdk201/repos/ha-dashboard
+ln -s /home/jdk201/repos/ha-dashboard /home/jdk201/ha-dashboard
+# .env (git-ignored): HA_HOST/HA_TOKEN plus the overscan/width insets
+cat >> /home/jdk201/ha-dashboard/.env <<'ENV'
+FB_SAFE_MARGIN=0.04
+FB_SAFE_MARGIN_X=0.03
+FB_SAFE_MARGIN_Y=0.04
+ENV
+sudo cp /home/jdk201/ha-dashboard/ha-dashboard.service /etc/systemd/system/
+sudo systemctl daemon-reload && sudo systemctl enable --now ha-dashboard
+```
+
+The `ha-dashboard.service` file is shared with the Pi unchanged (it uses the `~/ha-dashboard` path) — apt's `python3-*` keep `/usr/bin/python3` and websockets 10.4, which `ha_client.py` is compatible with. On `macmini1` the checkout lives at `~/repos/ha-dashboard` with `~/ha-dashboard` symlinked to it, so the shared unit, `update.sh`, and `EnvironmentFile` all resolve without editing the unit.
+
+**Keeping in sync**: `update.sh` + `ha-dashboard-update.{service,timer}` poll `origin` every 10 min and `git pull` + restart only when the branch moved. Install once:
+
+```bash
+sudo cp /home/jdk201/ha-dashboard/ha-dashboard-update.{service,timer} /etc/systemd/system/
+sudo systemctl daemon-reload && sudo systemctl enable --now ha-dashboard-update.timer
+```
+
+Force an immediate sync with `sudo systemctl start ha-dashboard-update` (or `sudo /home/jdk201/ha-dashboard/update.sh`).
+
+**TV / console notes** (machine-specific, migrated from the retired `macmini-dashboard` repo):
+- **HDMI link autosuspend** — the i915 GPU runtime-suspends when idle and drops the HDMI link (console/dashboard "appears then disappears"). Fixed by pinning `power/control=on` for PCI `0000:00:02.0` via the `i915-no-runtime-pm.service` systemd unit (oneshot, `After=multi-user.target`, `RemainAfterExit=yes`). A udev rule alone is insufficient (the driver resets it to `auto` after coldplug). The dashboard's continuous `/dev/fb0` writes also keep the GPU active, which helps.
+- **Overscan** — the TV crops ~2.5–5% of the edges. Handled in software via `FB_SAFE_MARGIN=0.04`; alternatively set the TV's aspect to "Just Scan"/"Screen Fit"/"1:1" and drop the margin.
+- **Bare console legibility** (for logging into the TTY directly): `TerminusBold 32x16` in `/etc/default/console-setup`, and `GRUB_GFXMODE=1920x1080` + `GRUB_GFXPAYLOAD_LINUX=keep` in `/etc/default/grub`.
