@@ -336,11 +336,14 @@ def _draw_face(surf, cx, cy, happy, color):
         pygame.draw.arc(surf, color, pygame.Rect(cx - 3, cy + 1, 6, 4), 0, math.pi, 1)
 
 
-def _draw_battery(surf, bx, by, pct, color):
+def _draw_battery(surf, bx, by, pct, color, charging=False):
     pygame.draw.rect(surf, color, pygame.Rect(bx, by, 18, 10), 1)
     pygame.draw.rect(surf, color, pygame.Rect(bx + 18, by + 3, 3, 4))
     fill_w = max(1, int(16 * pct / 100))
     pygame.draw.rect(surf, color, pygame.Rect(bx + 1, by + 1, fill_w, 8))
+    if charging:
+        pts = [(bx + 11, by + 1), (bx + 7, by + 5), (bx + 10, by + 5), (bx + 7, by + 9)]
+        pygame.draw.lines(surf, RED, False, pts, 2)
 
 
 def draw_family(surf, fonts, rect):
@@ -361,6 +364,7 @@ def draw_family(surf, fonts, rect):
         loc_state = data.get("state", "unknown")
         loc_str   = (data.get("location") or "Unknown")[:23]
         bat       = data.get("battery")
+        charging  = data.get("charging", False)
         dist      = data.get("distance_miles")
 
         if loc_state == "home":
@@ -386,7 +390,7 @@ def draw_family(surf, fonts, rect):
         surf.blit(fonts["sm"].render(labels[key], True, TEXT), (x, y + 3))
         surf.blit(fonts["md"].render(loc_str, True, loc_color), (x + 95, y))
         surf.blit(fonts["sm"].render(dist_str, True, DIM), (DIST_X, y + 3))
-        _draw_battery(surf, BAT_X - 26, cy - 5, bat_val, bat_color)
+        _draw_battery(surf, BAT_X - 26, cy - 5, bat_val, bat_color, charging)
         surf.blit(fonts["sm"].render(bat_str, True, bat_color), (BAT_X, y + 3))
         y += ROW_H
 
@@ -408,16 +412,15 @@ def draw_calendar(surf, fonts, rect):
         return
 
     max_w = rect.w - 20
-    for ev in events[:4]:
-        s = fonts["sm"].render(ev, True, TEXT)
+    for ev in events[:5]:
+        s = fonts["md"].render(ev, True, TEXT)
         if s.get_width() > max_w:
-            # Truncate with ellipsis
             while s.get_width() > max_w and len(ev) > 3:
                 ev = ev[:-1]
-                s = fonts["sm"].render(ev + "...", True, TEXT)
-            s = fonts["sm"].render(ev + "...", True, TEXT)
+                s = fonts["md"].render(ev + "...", True, TEXT)
+            s = fonts["md"].render(ev + "...", True, TEXT)
         surf.blit(s, (x, y))
-        y += 22
+        y += 24
         if y > rect.bottom - 10:
             break
 
