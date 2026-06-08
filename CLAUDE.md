@@ -2,6 +2,10 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## Development
+
+No build step, test suite, or linter. Edit `main.py` or `ha_client.py` directly and restart the service to test. To run without the service: `python3 main.py` (requires `/dev/fb0` write access). There are no automated tests — verify changes visually on the display.
+
 ## What this is
 
 A fullscreen pygame dashboard that displays live Home Assistant sensor data. It renders to `/dev/fb0` directly (bypassing X11/Wayland), managed by a systemd service. The **same code and service file** run on both hosts; all Python changes affect both deployments.
@@ -55,7 +59,7 @@ sudo systemctl daemon-reload
 
 The app has two threads:
 
-1. **WebSocket thread** (`ws_thread` → `HAClient.run`): Connects to HA at `HA_WS_URL`, fetches a full state snapshot on connect, then subscribes to `state_changed` events. On each event, it merges the new state into `self.states` and calls `on_state_change(self.states, entity_id)` — passing the **full** states dict every time (not a diff) and the ID of the entity that changed. `on_state_change` in `main.py` replaces `_states` under `_states_lock` and sets `_connected = True`. Reconnects automatically on failure with a 5-second backoff.
+1. **WebSocket thread** (`ws_thread` → `HAClient.run`): Connects to HA at `HA_WS_URL`, fetches a full state snapshot on connect, then subscribes to `state_changed` events. On each event, it merges the new state into `self.states` and calls `on_state_change(self.states)` — passing the **full** states dict every time, not a diff. `on_state_change` in `main.py` replaces `_states` under `_states_lock` and sets `_connected = True`. Reconnects automatically on failure with a 5-second backoff.
 
 2. **Pygame main loop** (`main`): Polls at 4 FPS but rendering is **event-driven** via `_dirty` (a `threading.Event`). A frame is only drawn when `_dirty` is set *and* at least 1 second has elapsed since the last render. `_dirty` is set by: `on_state_change` (only for entities listed in `_WATCHED_ENTITIES`, or `None` on initial snapshot load), `on_forecast`, and the main loop itself once per minute (to tick the clock). **When adding a new entity to a card, add it to `_WATCHED_ENTITIES` in `main.py` or state changes for that entity will silently skip re-renders.** If `_connected` is False, shows a connecting splash instead.
 
@@ -84,12 +88,10 @@ The screen is divided into a fixed header (`HDR_H = 90px`) and a 2-column × 3-r
 |---|---|
 | `card_rect(0, 0)` | `draw_climate` |
 | `card_rect(1, 0)` | `draw_system_status` |
-| `card_rect(0, 1)` | `draw_security` |
+| `card_rect(0, 1)` | `draw_security` (titled **"HOME"** on screen) |
 | `card_rect(1, 1)` | `draw_family` |
 | `card_rect(0, 2)` | `draw_calendar` |
 | `card_rect(1, 2)` | `draw_lights` |
-
-Current card contents: `draw_climate` — upstairs/downstairs temp, humidity, thermostat set range, hot tub (5 rows). `draw_system_status` — HA/Docker/Mac Mini/Pi health, network speed+clients (5 rows). `draw_security` (titled "HOME") — garage door, waterfall level, hot tub water age, furnace filter age, coffee filter age (5 rows). `draw_family` — per-member location/battery/distance (5 rows). `draw_calendar` — upcoming calendar events. `draw_lights` — 13 lights in 3 columns.
 
 **Adding a new card**: write a `draw_*` function, call it from `main()`, and add any new entity IDs to `_WATCHED_ENTITIES`. Use `draw_card()` for the card background/header, then `row()` for content:
 
@@ -100,11 +102,14 @@ def row(surf, fonts, x, y, label, value, val_color=TEXT, label_w=160) -> int:
 
 **Row spacing**: each card has 128px of content (CARD_H=154 − TITLE_H=26). `LINE_H=28` is the default but cards with 5 rows use a manual `y += 25` instead of the `row()` return value to fit without clipping. Cards with 4 rows use `y += 30` to fill the space evenly. Don't rely on `LINE_H` — check the math for the target card.
 
-**Header annotations**: several cards render right-justified text in the title bar (same `y + 5`, `rect.right - width - 10` pattern): System Status shows Public IP, Calendar shows Steam sales, Family shows "Best Family of All Time!" (hard-coded), Lights shows next sunrise or sunset time from `sun.sun` (switches based on `sun.sun` state: `above_horizon` → next_setting, `below_horizon` → next_rising; parsed from UTC ISO via `datetime.fromisoformat().astimezone()`).
-
-**Colors**: `TEXT = (210,218,235)` (light blue-white) is the default value color in `row()` and general content. `DIM = (255,255,255)` (white) is used for label text and secondary content. `LIGHTS_DIM = (100,112,148)` (gray) is reserved for off-state indicators in the lights panel only. `ACCENT = (70,150,255)` (blue) is used for card titles and right-justified header annotations. Status values use `GREEN`/`YELLOW`/`RED`/`ORANGE` directly.
+**Colors**: `DIM = (255,255,255)` (white) is used for secondary/label text everywhere. `LIGHTS_DIM = (100,112,148)` (gray) is reserved for off-state indicators in the lights panel only. `ACCENT = (70,150,255)` (blue) is used for card titles and right-justified header annotations (e.g. Public IP, Steam sales). Health sensor values map to `GREEN`/`YELLOW`/`RED` via `STATUS_COLOR = {"healthy": GREEN, "warning": YELLOW, "critical": RED}`.
 
 **Font sizes** (Ubuntu/sans): `xl`=52 bold, `lg`=34 bold, `md`=22, `sm`=17.
+
+**Custom sensor shapes** (not visible from entity names alone):
+
+- `sensor.family_locations` — state is unused; `attr_of(..., "members", {})` returns a dict keyed by lowercase first name (`"jonathan"`, `"laura"`, etc.), each value `{"state": "home"|"not_home"|"unknown", "location": str, "battery": int|None, "charging": bool, "distance_miles": float|None}`.
+- `sensor.upcoming_calendar_events` — a pipe-delimited `|` string of event descriptions (e.g. `"School play | Doctor appt"`). Split on `|`, strip whitespace; up to 5 shown. Empty or `"--"` means no events.
 
 ## Raspberry Pi system notes
 
@@ -114,7 +119,7 @@ def row(surf, fonts, x, y, label, value, val_color=TEXT, label_w=160) -> int:
 
 ## Deployment on Ubuntu/Intel (macmini1)
 
-Second deployment of this exact repo. Edits are made upstream on `py-dashboard`; this host pulls them automatically (see "Keeping in sync").
+Second deployment of this exact repo. Edits are made on the Raspberry Pi (`py-dashboard`) and pushed to origin; this host pulls them automatically (see "Keeping in sync").
 
 **Host**: `macmini1` — Ubuntu 24.04.4 LTS, kernel 6.8.0-124-generic, Intel Core i5-3210M, 8 GB RAM, IP `192.168.68.152`. No desktop environment — pure TTY. Display is a 1080p TV on the **direct HDMI** port (`HDMI-A-3`); a USB-to-HDMI adapter (Norelsys NS1081) is also plugged in but has no Linux DRM driver and never produces signal — ignore it. `sudo` is passwordless.
 
@@ -138,7 +143,7 @@ sudo systemctl daemon-reload && sudo systemctl enable --now ha-dashboard
 
 The `ha-dashboard.service` file is shared with the Pi unchanged (it uses the `~/ha-dashboard` path) — apt's `python3-*` keep `/usr/bin/python3` and websockets 10.4, which `ha_client.py` is compatible with. On `macmini1` the checkout lives at `~/repos/ha-dashboard` with `~/ha-dashboard` symlinked to it, so the shared unit, `update.sh`, and `EnvironmentFile` all resolve without editing the unit.
 
-**Keeping in sync** (macmini1 only): `update.sh` + `ha-dashboard-update.{service,timer}` poll `origin` every 10 min and `git pull` + restart only when the branch moved. Install once:
+**Keeping in sync** (macmini1 only): `update.sh` + `ha-dashboard-update.{service,timer}` poll `origin` every hour and restart only when the branch moved. Install once:
 
 ```bash
 sudo cp /home/jdk201/ha-dashboard/ha-dashboard-update.{service,timer} /etc/systemd/system/

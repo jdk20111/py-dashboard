@@ -24,6 +24,6 @@ if [ "$local_rev" = "$remote_rev" ]; then
 fi
 
 echo "updating $local_rev -> $remote_rev"
-git_as merge --ff-only "origin/$BRANCH"
+git_as reset --hard "origin/$BRANCH"
 systemctl restart ha-dashboard
 echo "restarted ha-dashboard"
