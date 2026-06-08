@@ -4,7 +4,18 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-A fullscreen pygame dashboard that displays live Home Assistant sensor data. It renders to `/dev/fb0` directly (bypassing X11/Wayland), managed by a systemd service. The same codebase runs on a **Raspberry Pi** (1024×600, 16bpp RGB565) and on an **Intel/Ubuntu box** such as `macmini1` (1920×1080, 32bpp) — the framebuffer layer auto-adapts to the panel's size/depth/stride and scales the canvas to fit (see "Display path"). The Pi is the original target; `macmini1` is a second deployment kept in sync via git (see "Deployment on Ubuntu/Intel").
+A fullscreen pygame dashboard that displays live Home Assistant sensor data. It renders to `/dev/fb0` directly (bypassing X11/Wayland), managed by a systemd service. The **same code and service file** run on both hosts; all Python changes affect both deployments.
+
+| | Raspberry Pi | macmini1 |
+|---|---|---|
+| OS | Raspberry Pi OS (aarch64) | Ubuntu 24.04.4 LTS |
+| Display | 1024×600, 16bpp RGB565 | 1920×1080, 32bpp BGRX |
+| Safe margin | none (`.env` omits it) | `FB_SAFE_MARGIN_X=0.03`, `FB_SAFE_MARGIN_Y=0.04` |
+| Repo path | `~/ha-dashboard` | `~/repos/ha-dashboard` (symlinked to `~/ha-dashboard`) |
+| Code changes | made here, pushed to origin | pulled automatically every 10 min via `ha-dashboard-update` timer |
+| Dependencies | pip | apt |
+
+The framebuffer layer auto-adapts to the panel's size/depth/stride and scales the canvas to fit (see "Display path").
 
 ## Dependencies
 
@@ -21,6 +32,8 @@ sudo apt install -y python3-pygame python3-numpy python3-websockets
 `config.py` reads `HA_HOST`, `HA_PORT`, and `HA_TOKEN` from environment variables, falling back to defaults. `HA_WS_URL`, `SCREEN_WIDTH` (1024), and `SCREEN_HEIGHT` (600) are derived there. The service loads secrets via `EnvironmentFile=/home/jdk201/ha-dashboard/.env` (git-ignored); set `HA_TOKEN=...` in that file. To point at a different HA instance, edit the env var defaults in `config.py` or override in `.env`.
 
 ## Running and managing the service
+
+These commands work identically on both hosts.
 
 ```bash
 # Run directly (renders to /dev/fb0 — must have write access)
@@ -44,9 +57,9 @@ The app has two threads:
 
 1. **WebSocket thread** (`ws_thread` → `HAClient.run`): Connects to HA at `HA_WS_URL`, fetches a full state snapshot on connect, then subscribes to `state_changed` events. On each event, it merges the new state into `self.states` and calls `on_state_change(self.states)` — passing the **full** states dict every time, not a diff. `on_state_change` in `main.py` replaces `_states` under `_states_lock` and sets `_connected = True`. Reconnects automatically on failure with a 5-second backoff.
 
-2. **Pygame main loop** (`main`): Runs at 10 FPS. Reads `_connected` under the lock each frame and renders all cards. If `_connected` is False, shows a connecting splash.
+2. **Pygame main loop** (`main`): Polls at 4 FPS but rendering is **event-driven** via `_dirty` (a `threading.Event`). A frame is only drawn when `_dirty` is set *and* at least 1 second has elapsed since the last render. `_dirty` is set by: `on_state_change` (only for entities listed in `_WATCHED_ENTITIES`, or `None` on initial snapshot load), `on_forecast`, and the main loop itself once per minute (to tick the clock). **When adding a new entity to a card, add it to `_WATCHED_ENTITIES` in `main.py` or state changes for that entity will silently skip re-renders.** If `_connected` is False, shows a connecting splash instead.
 
-**Forecast data** flows via a separate `on_forecast` callback and `_forecast_lock`. `HAClient` requests forecast on connect (via `call_service weather.get_forecasts`) and re-requests whenever `weather.forecast_home` changes. Message IDs 1 and 2 are reserved for the handshake/subscription; dynamic requests start at 3.
+**Forecast data** flows via a separate `on_forecast` callback and `_forecast_lock`. `HAClient` requests forecast on connect (via `call_service weather.get_forecasts`) and re-requests whenever `weather.pirateweather` changes. Message IDs 1 and 2 are reserved for the handshake/subscription; dynamic requests start at 3.
 
 ## Display path
 
@@ -61,20 +74,31 @@ The canvas is always rendered at `SCREEN_WIDTH × SCREEN_HEIGHT` (1024×600). `_
 
 On the Pi specifically, the `vc4drmfb` driver holds DRM master permanently (`vc4.kms_fbdev=0` is silently ignored — `vc4: unknown parameter 'kms_fbdev' ignored`), so SDL's kmsdrm driver can never acquire DRM master; direct `/dev/fb0` file I/O is the working path. On Intel the same direct-fb path is used.
 
-**Why not kmsdrm**: the `vc4drmfb` kernel driver holds DRM master permanently (the `vc4.kms_fbdev=0` parameter is silently ignored on this kernel — `vc4: unknown parameter 'kms_fbdev' ignored`), so SDL's kmsdrm driver can never acquire DRM master. Direct `/dev/fb0` file I/O is the working path.
-
 **Restoring the console**: when the service is stopped, the last rendered frame stays frozen on screen. To restore the Linux console run: `sudo python3 -c "import fcntl,os; fd=os.open('/dev/tty1',os.O_RDWR); fcntl.ioctl(fd,0x4B3A,0); os.close(fd)"`
 
 ## Layout system
 
-The screen is divided into a fixed header (`HDR_H = 90px`) and a 2-column × 3-row card grid. `card_rect(col, row)` returns the `pygame.Rect` for any card position. Card rendering functions (`draw_climate`, `draw_power`, etc.) each receive the surface, font dict, and rect, and are called from `main()` with explicit `card_rect` positions.
+The screen is divided into a fixed header (`HDR_H = 90px`) and a 2-column × 3-row card grid. `card_rect(col, row)` returns the `pygame.Rect` for any card position. Card rendering functions each receive the surface, font dict, and rect, and are called from `main()` with explicit `card_rect` positions:
 
-**Adding a new card**: write a `draw_*` function, then call it from `main()` with a `card_rect(col, row)` position. Use `draw_card()` to render the card background/header, then lay out content with the `row()` helper:
+| Position | Card |
+|---|---|
+| `card_rect(0, 0)` | `draw_climate` |
+| `card_rect(1, 0)` | `draw_system_status` |
+| `card_rect(0, 1)` | `draw_security` |
+| `card_rect(1, 1)` | `draw_family` |
+| `card_rect(0, 2)` | `draw_calendar` |
+| `card_rect(1, 2)` | `draw_lights` |
+
+**Adding a new card**: write a `draw_*` function, call it from `main()`, and add any new entity IDs to `_WATCHED_ENTITIES`. Use `draw_card()` for the card background/header, then `row()` for content:
 
 ```python
 def row(surf, fonts, x, y, label, value, val_color=TEXT, label_w=160) -> int:
-    # renders label in DIM at x, value in val_color at x+label_w; returns y + LINE_H (28px)
+    # renders label in white (DIM) at x, value in val_color at x+label_w; returns y + LINE_H (28px)
 ```
+
+**Row spacing**: each card has 128px of content (CARD_H=154 − TITLE_H=26). `LINE_H=28` is the default but cards with 5 rows use a manual `y += 25` instead of the `row()` return value to fit without clipping. Cards with 4 rows use `y += 30` to fill the space evenly. Don't rely on `LINE_H` — check the math for the target card.
+
+**Colors**: `DIM = (255,255,255)` (white) is used for secondary/label text everywhere. `LIGHTS_DIM = (100,112,148)` (gray) is reserved for off-state indicators in the lights panel only. `ACCENT = (70,150,255)` (blue) is used for card titles and right-justified header annotations (e.g. Public IP, Steam sales).
 
 **Font sizes** (Ubuntu/sans): `xl`=52 bold, `lg`=34 bold, `md`=22, `sm`=17.
 
@@ -110,7 +134,7 @@ sudo systemctl daemon-reload && sudo systemctl enable --now ha-dashboard
 
 The `ha-dashboard.service` file is shared with the Pi unchanged (it uses the `~/ha-dashboard` path) — apt's `python3-*` keep `/usr/bin/python3` and websockets 10.4, which `ha_client.py` is compatible with. On `macmini1` the checkout lives at `~/repos/ha-dashboard` with `~/ha-dashboard` symlinked to it, so the shared unit, `update.sh`, and `EnvironmentFile` all resolve without editing the unit.
 
-**Keeping in sync**: `update.sh` + `ha-dashboard-update.{service,timer}` poll `origin` every 10 min and `git pull` + restart only when the branch moved. Install once:
+**Keeping in sync** (macmini1 only): `update.sh` + `ha-dashboard-update.{service,timer}` poll `origin` every 10 min and `git pull` + restart only when the branch moved. Install once:
 
 ```bash
 sudo cp /home/jdk201/ha-dashboard/ha-dashboard-update.{service,timer} /etc/systemd/system/

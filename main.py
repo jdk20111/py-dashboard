@@ -36,8 +36,11 @@ _WATCHED_ENTITIES = {
     "sensor.downstairs_temperature", "sensor.ecobee_upstairs_current_humidity",
     "sensor.ecobee_upstairs_current_temperature", "sensor.family_locations",
     "sensor.furnace_filter_age", "sensor.hot_tub_water_age",
+    "sensor.docker_env_health", "sensor.ha_health",
     "sensor.m5_download_speed", "sensor.m5_upload_speed",
-    "sensor.steam_sales", "sensor.tp_link_router_total_clients",
+    "sensor.mac_mini_health", "sensor.pi_health",
+    "sensor.public_ip", "sensor.steam_sales",
+    "sensor.tp_link_router_total_clients",
     "sensor.upcoming_calendar_events", "sensor.water_tank_level",
     "sensor.xcel_itron_instantaneous_demand_value",
     "weather.pirateweather",
@@ -89,18 +92,11 @@ def fmt_temp(val) -> str:
         return str(val) if val else "--"
 
 
-def fmt_power() -> str:
-    try:
-        w = float(state_of("sensor.xcel_itron_instantaneous_demand_value", "0"))
-        return f"{w / 1000:.2f} kW" if w >= 1000 else f"{w:.0f} W"
-    except (TypeError, ValueError):
-        return "--"
-
 
 def fmt_speed(entity_id: str) -> str:
     try:
         val = float(state_of(entity_id, "0"))
-        return f"{val / 1024:.1f} MiB/s" if val >= 1024 else f"{val:.0f} KiB/s"
+        return f"{val / 1024:.1f}M" if val >= 1024 else f"{val:.0f}K"
     except (TypeError, ValueError):
         return "--"
 
@@ -120,7 +116,8 @@ BG        = (12,  15,  25)
 CARD_BG   = (22,  28,  48)
 CARD_HEAD = (32,  42,  72)
 TEXT      = (210, 218, 235)
-DIM       = (100, 112, 148)
+DIM       = (255, 255, 255)
+LIGHTS_DIM = (100, 112, 148)   # off-state lights only
 ACCENT    = (70,  150, 255)
 GREEN     = (75,  200, 110)
 ORANGE    = (255, 160,  40)
@@ -285,7 +282,7 @@ def draw_header(surf: pygame.Surface, fonts: dict):
 
 def draw_climate(surf, fonts, rect):
     draw_card(surf, fonts, rect, "CLIMATE")
-    x, y = rect.x + 10, rect.y + TITLE_H + 6
+    x, y = rect.x + 10, rect.y + TITLE_H + 8
 
     up_temp = state_of("sensor.ecobee_upstairs_current_temperature")
     dn_temp = state_of("sensor.downstairs_temperature")
@@ -293,43 +290,58 @@ def draw_climate(surf, fonts, rect):
     t_lo = attr_of("climate.ecobee_thermostat_thermostat", "target_temp_low")
     t_hi = attr_of("climate.ecobee_thermostat_thermostat", "target_temp_high")
 
-    y = row(surf, fonts, x, y, "Upstairs",   fmt_temp(up_temp))
-    y = row(surf, fonts, x, y, "Downstairs", fmt_temp(dn_temp))
-    y = row(surf, fonts, x, y, "Humidity",   f"{hum}%")
-
     tstat_val = f"{fmt_temp(t_lo)} – {fmt_temp(t_hi)}" if t_lo and t_hi else "--"
-    y = row(surf, fonts, x, y, "Set Range",  tstat_val)
+    for label, value in [
+        ("Upstairs",   fmt_temp(up_temp)),
+        ("Downstairs", fmt_temp(dn_temp)),
+        ("Humidity",   f"{hum}%"),
+        ("Set Range",  tstat_val),
+    ]:
+        row(surf, fonts, x, y, label, value)
+        y += 30
 
 
-def draw_power(surf, fonts, rect):
-    draw_card(surf, fonts, rect, "POWER & NETWORK")
-    x, y = rect.x + 10, rect.y + TITLE_H + 4
+def draw_system_status(surf, fonts, rect):
+    draw_card(surf, fonts, rect, "SYSTEM STATUS")
+    ip = state_of("sensor.public_ip", "")
+    if ip and ip != "--":
+        s = fonts["sm"].render(f"Public IP: {ip}", True, ACCENT)
+        surf.blit(s, (rect.right - s.get_width() - 10, rect.y + 5))
+    x, y = rect.x + 10, rect.y + TITLE_H + 2
 
-    pw = fmt_power()
-    pw_surf = fonts["lg"].render(pw, True, YELLOW)
-    surf.blit(pw_surf, (rect.x + rect.w // 2 - pw_surf.get_width() // 2, y))
-    y += 40
+    sensors = [
+        ("HA Host",      "sensor.ha_health"),
+        ("Docker",       "sensor.docker_env_health"),
+        ("Mac Mini",     "sensor.mac_mini_health"),
+        ("Raspberry Pi", "sensor.pi_health"),
+    ]
 
-    dl = fmt_speed("sensor.m5_download_speed")
-    ul = fmt_speed("sensor.m5_upload_speed")
+    STATUS_COLOR = {"healthy": GREEN, "warning": YELLOW, "critical": RED}
+    for label, eid in sensors:
+        val = state_of(eid)
+        color = STATUS_COLOR.get(val.lower(), DIM)
+        row(surf, fonts, x, y, label, val.upper() if val != "--" else "--", color)
+        y += 25
+
+    dl      = fmt_speed("sensor.m5_download_speed")
+    ul      = fmt_speed("sensor.m5_upload_speed")
     clients = state_of("sensor.tp_link_router_total_clients")
-
-    y = row(surf, fonts, x, y, "Download", dl, GREEN)
-    y = row(surf, fonts, x, y, "Upload",   ul, ACCENT)
-    row(surf, fonts, x, y, "Devices", f"{clients} connected", DIM)
+    row(surf, fonts, x, y, "Network", f"↓ {dl}  ↑ {ul}  {clients} Clients", DIM)
 
 
 def draw_security(surf, fonts, rect):
     draw_card(surf, fonts, rect, "HOME")
-    x, y = rect.x + 10, rect.y + TITLE_H + 6
+    x, y = rect.x + 10, rect.y + TITLE_H + 3
 
     garage = state_of("cover.garage_door")
     g_color = GREEN if garage == "closed" else ORANGE
-    y = row(surf, fonts, x, y, "Garage Door",
+    row(surf, fonts, x, y, "Garage Door",
             garage.upper() if garage != "--" else "--", g_color)
+    y += 25
 
     water = state_of("sensor.water_tank_level")
-    y = row(surf, fonts, x, y, "Waterfall", water)
+    row(surf, fonts, x, y, "Waterfall", water)
+    y += 25
 
     ht_temp = attr_of("climate.hottub", "current_temperature")
     ht_set  = attr_of("climate.hottub", "temperature")
@@ -339,10 +351,12 @@ def draw_security(surf, fonts, rect):
         ht_val += f"  (set {fmt_temp(ht_set)})"
     if ht_act and ht_act != "off":
         ht_val += f"  ▲ heating"
-    y = row(surf, fonts, x, y, "Hot Tub", ht_val)
+    row(surf, fonts, x, y, "Hot Tub", ht_val)
+    y += 25
 
     water_age = state_of("sensor.hot_tub_water_age")
-    y = row(surf, fonts, x, y, "Hot Tub Water Age", f"{water_age} days")
+    row(surf, fonts, x, y, "Hot Tub Water Age", f"{water_age} days")
+    y += 25
 
     filter_age = state_of("sensor.furnace_filter_age")
     row(surf, fonts, x, y, "Furnace Filter Age", f"{filter_age} days")
@@ -448,9 +462,17 @@ def draw_calendar(surf, fonts, rect):
             break
 
 
+def _draw_bulb(surf, x, y, on):
+    color = YELLOW if on else LIGHTS_DIM
+    cx = x + 8
+    pygame.draw.circle(surf, color, (cx, y + 8), 7, 0 if on else 1)
+    pygame.draw.rect(surf, color, pygame.Rect(cx - 3, y + 15, 6, 5))
+    pygame.draw.rect(surf, color, pygame.Rect(cx - 2, y + 20, 4, 2))
+
+
 def draw_lights(surf, fonts, rect):
     draw_card(surf, fonts, rect, "LIGHTS")
-    x, y = rect.x + 10, rect.y + TITLE_H + 6
+    x, y = rect.x + 10, rect.y + TITLE_H + 3
 
     lights = [
         ("Garage 1",    "light.garage_light_center"),
@@ -471,7 +493,7 @@ def draw_lights(surf, fonts, rect):
     COLS = 3
     ROWS = (len(lights) + COLS - 1) // COLS
     COL_W = (rect.w - 10) // COLS
-    ROW_H = 22
+    ROW_H = 24
 
     for i, (label, eid) in enumerate(lights):
         col = i // ROWS
@@ -479,9 +501,8 @@ def draw_lights(surf, fonts, rect):
         lx = x + col * COL_W
         ly = y + row * ROW_H
         st = state_of(eid)
-        color = GREEN if st == "on" else DIM
-        surf.blit(fonts["sm"].render("●", True, color), (lx, ly))
-        surf.blit(fonts["sm"].render(label, True, TEXT if st == "on" else DIM), (lx + 14, ly + 2))
+        _draw_bulb(surf, lx, ly, st == "on")
+        surf.blit(fonts["md"].render(label, True, TEXT if st == "on" else LIGHTS_DIM), (lx + 20, ly))
 
 
 # Framebuffer output.
@@ -643,7 +664,7 @@ def main():
                 else:
                     draw_header(screen, fonts)
                     draw_climate(screen,  fonts, card_rect(0, 0))
-                    draw_power(screen,    fonts, card_rect(1, 0))
+                    draw_system_status(screen, fonts, card_rect(1, 0))
                     draw_security(screen, fonts, card_rect(0, 1))
                     draw_family(screen,   fonts, card_rect(1, 1))
                     draw_calendar(screen, fonts, card_rect(0, 2))
